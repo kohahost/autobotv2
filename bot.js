@@ -56,11 +56,6 @@ async function claimAllBalances(server, senderKeypair, senderPublic) {
       } catch (err) {
         const errorMsg = err.response?.data || err.message || err;
         console.error(`⚠️ Gagal klaim ID ${claim.id}:`, errorMsg);
-
-        // Notifikasi jika error karena underfunded
-        if (JSON.stringify(errorMsg).includes("paymentUnderfunded")) {
-          await notifyTelegram(`❌ Gagal klaim ID ${claim.id}: paymentUnderfunded`);
-        }
       }
     }
   } catch (err) {
@@ -107,7 +102,6 @@ async function sendPi() {
 
     if (withdrawAmount <= 0) {
       console.log("⚠️ Saldo tidak cukup");
-      await notifyTelegram(`⚠️ Saldo tidak cukup untuk kirim dari ${senderPublic}`);
       return;
     }
 
@@ -130,20 +124,23 @@ async function sendPi() {
     tx.sign(senderKeypair);
     const result = await server.submitTransaction(tx);
 
-    const txHash = result.hash;
-    const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
+    if (result && result.hash) {
+      const txHash = result.hash;
+      const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
+      console.log(`✅ Transaksi berhasil! TxHash: ${txHash}`);
+      console.log(`🔗 ${explorerLink}`);
 
-    console.log(`✅ Transaksi berhasil! TxHash: ${txHash}`);
-    console.log(`🔗 ${explorerLink}`);
-
-    await notifyTelegram(`✅ Berhasil kirim ${amountStr} Pi ke ${recipient}\n🔗 ${explorerLink}`);
+      await notifyTelegram(`✅ Berhasil kirim ${amountStr} Pi ke ${recipient}\n🔗 ${explorerLink}`);
+    } else {
+      console.log("⚠️ Transaksi gagal:", result);
+    }
 
   } catch (e) {
     console.error("❌ Error saat mengirim:", e.response?.data || e.message || e);
-    await notifyTelegram(`❌ Gagal mengirim: ${e.response?.data?.extras?.result_codes?.operations || e.message}`);
+    // Tidak kirim notifikasi Telegram agar tidak spam
   } finally {
-    console.log("⏳ Tunggu 2 detik...\n");
-    setTimeout(sendPi, 2000);
+    console.log("⏳ Tunggu 1.5 detik...\n");
+    setTimeout(sendPi, 1500);
   }
 }
 
