@@ -24,7 +24,7 @@ async function getPiWalletAddressFromSeed(mnemonic) {
 // Fungsi klaim semua claimable balances
 async function claimAllBalances(server, senderKeypair, senderPublic) {
   try {
-    const claimUrl = `https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=10`;
+    const claimUrl = `https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=100`;
     const resClaim = await axios.get(claimUrl);
     const claimables = resClaim.data._embedded?.records || [];
     
