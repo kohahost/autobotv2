@@ -1,3 +1,4 @@
+// index.js
 const StellarSdk = require('stellar-sdk');
 const ed25519 = require('ed25519-hd-key');
 const bip39 = require('bip39');
@@ -6,6 +7,11 @@ require('dotenv').config();
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const MIN_SEND_BALANCE = 2.0001;
+
+let isProcessing = false;
+let lastAccountData = null;
+let lastClaimables = null;
 
 async function getPiWalletAddressFromSeed(mnemonic) {
   if (!bip39.validateMnemonic(mnemonic)) {
@@ -20,20 +26,52 @@ async function getPiWalletAddressFromSeed(mnemonic) {
   };
 }
 
-async function claimAllBalances(server, senderKeypair, senderPublic) {
+async function notifyTelegram(message) {
   try {
-    const claimUrl = `https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=100`;
-    const resClaim = await axios.get(claimUrl);
-    const claimables = resClaim.data._embedded?.records || [];
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: "Markdown"
+    });
+  } catch (e) {
+    console.error("❌ Gagal kirim notifikasi Telegram:", e.message);
+  }
+}
 
-    if (claimables.length === 0) {
-      console.log("📥 Tidak ada claimable balances.");
-      return;
-    }
+async function checkIfShouldRequest() {
+  if (isProcessing) return false;
 
-    console.log(`📥 Ada ${claimables.length} claimable balances. Klaim satu per satu...`);
+  const nativeBalance = lastAccountData?.balances?.find(b => b.asset_type === 'native');
+  const balance = nativeBalance ? parseFloat(nativeBalance.balance) : 0;
+  if (balance > MIN_SEND_BALANCE) return true;
 
-    for (const claim of claimables) {
+  if (lastClaimables && lastClaimables.length > 0) return true;
+
+  return false;
+}
+
+async function processClaimAndSend() {
+  const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
+  const mnemonic = process.env.MNEMONIC;
+  const recipient = process.env.RECEIVER_ADDRESS;
+
+  const wallet = await getPiWalletAddressFromSeed(mnemonic);
+  const senderKeypair = StellarSdk.Keypair.fromSecret(wallet.secretKey);
+  const senderPublic = wallet.publicKey;
+
+  const accountRes = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
+  lastAccountData = accountRes.data;
+
+  const nativeBalanceObj = lastAccountData.balances.find(b => b.asset_type === 'native');
+  const balance = nativeBalanceObj ? parseFloat(nativeBalanceObj.balance) : 0;
+
+  const claimUrl = `https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=100`;
+  const claimRes = await axios.get(claimUrl);
+  lastClaimables = claimRes.data._embedded?.records || [];
+
+  if (lastClaimables.length > 0) {
+    console.log(`📥 Klaim ${lastClaimables.length} saldo...`);
+    for (const claim of lastClaimables) {
       try {
         const account = await server.loadAccount(senderPublic);
         const baseFee = await server.fetchBaseFee();
@@ -49,95 +87,63 @@ async function claimAllBalances(server, senderKeypair, senderPublic) {
           .build();
 
         tx.sign(senderKeypair);
-
-        const result = await server.submitTransaction(tx);
-        console.log(`✅ Berhasil klaim ID ${claim.id}`);
+        await server.submitTransaction(tx);
+        console.log(`✅ Klaim berhasil: ${claim.id}`);
       } catch (err) {
-        const errorMsg = err.response?.data || err.message || err;
-        console.error(`⚠️ Gagal klaim ID ${claim.id}:`, errorMsg);
+        console.error(`⚠️ Klaim gagal (${claim.id}):`, err.message);
       }
     }
-  } catch (err) {
-    console.error("❌ Error saat cek/klaim:", err.response?.data || err.message || err);
   }
+
+  const updatedRes = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
+  lastAccountData = updatedRes.data;
+
+  const newBalanceObj = lastAccountData.balances.find(b => b.asset_type === 'native');
+  const newBalance = newBalanceObj ? parseFloat(newBalanceObj.balance) : 0;
+
+  const withdrawAmount = newBalance - 2;
+  if (withdrawAmount <= 0) {
+    console.log("⚠️ Saldo belum cukup untuk kirim.");
+    return;
+  }
+
+  const amountStr = withdrawAmount.toFixed(7);
+  console.log(`➡️ Mengirim ${amountStr} Pi ke ${recipient}`);
+
+  const account = await server.loadAccount(senderPublic);
+  const baseFee = await server.fetchBaseFee();
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: baseFee.toString(),
+    networkPassphrase: 'Pi Network',
+  })
+    .addOperation(StellarSdk.Operation.payment({
+      destination: recipient,
+      asset: StellarSdk.Asset.native(),
+      amount: amountStr,
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(senderKeypair);
+  const result = await server.submitTransaction(tx);
+  const txHash = result.hash;
+  const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
+
+  console.log(`✅ Kirim sukses! 🔗 ${explorerLink}`);
+  await notifyTelegram(`✅ Kirim ${amountStr} Pi sukses!\n🔗 ${explorerLink}`);
 }
 
-async function notifyTelegram(message) {
+setInterval(async () => {
+  const shouldProcess = await checkIfShouldRequest();
+  if (!shouldProcess) return;
+
+  isProcessing = true;
   try {
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      chat_id: TELEGRAM_CHAT_ID,
-      text: message,
-      parse_mode: "Markdown"
-    });
+    await processClaimAndSend();
   } catch (e) {
-    console.error("❌ Gagal kirim notifikasi Telegram:", e.message);
-  }
-}
-
-async function sendPi() {
-  const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
-  const mnemonic = process.env.MNEMONIC;
-  const recipient = process.env.RECEIVER_ADDRESS;
-
-  try {
-    const wallet = await getPiWalletAddressFromSeed(mnemonic);
-    const senderKeypair = StellarSdk.Keypair.fromSecret(wallet.secretKey);
-    const senderPublic = wallet.publicKey;
-
-    console.log(`🚀 Alamat Dompet Pi: ${senderPublic}`);
-
-    await claimAllBalances(server, senderKeypair, senderPublic);
-
-    const resAccount = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
-    const nativeBalanceObj = resAccount.data.balances.find(b => b.asset_type === 'native');
-    const balance = nativeBalanceObj ? parseFloat(nativeBalanceObj.balance) : 0;
-    console.log(`💰 Saldo: ${balance} Pi`);
-
-    const baseFee = await server.fetchBaseFee();
-    const fee = baseFee.toString(); // Pakai fee dasar saja
-
-    const withdrawAmount = balance - 2;
-    if (withdrawAmount <= 0) {
-      console.log("⚠️ Saldo tidak cukup");
-      return;
-    }
-
-    const amountStr = withdrawAmount.toFixed(7);
-    console.log(`➡️ Mengirim ${amountStr} Pi ke ${recipient}`);
-
-    const account = await server.loadAccount(senderPublic);
-    const tx = new StellarSdk.TransactionBuilder(account, {
-      fee,
-      networkPassphrase: 'Pi Network',
-    })
-      .addOperation(StellarSdk.Operation.payment({
-        destination: recipient,
-        asset: StellarSdk.Asset.native(),
-        amount: amountStr,
-      }))
-      .setTimeout(30)
-      .build();
-
-    tx.sign(senderKeypair);
-    const result = await server.submitTransaction(tx);
-
-    if (result && result.hash) {
-      const txHash = result.hash;
-      const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
-      console.log(`✅ Transaksi berhasil! TxHash: ${txHash}`);
-      console.log(`🔗 ${explorerLink}`);
-
-      await notifyTelegram(`✅ Berhasil kirim ${amountStr} Pi ke ${recipient}\n🔗 ${explorerLink}`);
-    } else {
-      console.log("⚠️ Transaksi gagal:", result);
-    }
-
-  } catch (e) {
-    console.error("❌ Error saat mengirim:", e.response?.data || e.message || e);
+    console.error("❌ Error saat proses:", e.message);
   } finally {
-    console.log("⏳ Tunggu 499 ms...\n");
-    setTimeout(sendPi, 499);
+    isProcessing = false;
   }
-}
-
-sendPi();
+}, 100);
