@@ -4,7 +4,6 @@ const bip39 = require('bip39');
 const axios = require('axios');
 require('dotenv').config();
 
-// Telegram Bot info
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -87,19 +86,17 @@ async function sendPi() {
 
     console.log(`🚀 Alamat Dompet Pi: ${senderPublic}`);
 
-    // 1. Klaim semua claimable balance
     await claimAllBalances(server, senderKeypair, senderPublic);
 
-    // 2. Ambil saldo terbaru
     const resAccount = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
     const nativeBalanceObj = resAccount.data.balances.find(b => b.asset_type === 'native');
     const balance = nativeBalanceObj ? parseFloat(nativeBalanceObj.balance) : 0;
     console.log(`💰 Saldo: ${balance} Pi`);
 
     const baseFee = await server.fetchBaseFee();
-    const fee = (baseFee * 2).toString(); // Buffer biaya 2x
-    const withdrawAmount = balance - 2; // Sisakan 2 Pi
+    const fee = baseFee.toString(); // Pakai fee dasar saja
 
+    const withdrawAmount = balance - 2;
     if (withdrawAmount <= 0) {
       console.log("⚠️ Saldo tidak cukup");
       return;
@@ -137,10 +134,9 @@ async function sendPi() {
 
   } catch (e) {
     console.error("❌ Error saat mengirim:", e.response?.data || e.message || e);
-    // Tidak kirim notifikasi Telegram agar tidak spam
   } finally {
-    console.log("⏳ Tunggu 1.5 detik...\n");
-    setTimeout(sendPi, 1500);
+    console.log("⏳ Tunggu 1 detik...\n");
+    setTimeout(sendPi, 1000);
   }
 }
 
