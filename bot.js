@@ -1,4 +1,3 @@
-// index.js
 const StellarSdk = require('stellar-sdk');
 const ed25519 = require('ed25519-hd-key');
 const bip39 = require('bip39');
@@ -7,23 +6,17 @@ require('dotenv').config();
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const MIN_SEND_BALANCE = 2.0001;
 
-let isProcessing = false;
-let lastAccountData = null;
-let lastClaimables = null;
+const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
+const mnemonic = process.env.MNEMONIC;
+const recipient = process.env.RECEIVER_ADDRESS;
 
 async function getPiWalletAddressFromSeed(mnemonic) {
-  if (!bip39.validateMnemonic(mnemonic)) {
-    throw new Error("Mnemonic tidak valid");
-  }
+  if (!bip39.validateMnemonic(mnemonic)) throw new Error("Mnemonic tidak valid");
   const seed = await bip39.mnemonicToSeed(mnemonic);
   const { key } = ed25519.derivePath("m/44'/314159'/0'", seed.toString('hex'));
   const keypair = StellarSdk.Keypair.fromRawEd25519Seed(key);
-  return {
-    publicKey: keypair.publicKey(),
-    secretKey: keypair.secret(),
-  };
+  return { publicKey: keypair.publicKey(), secretKey: keypair.secret() };
 }
 
 async function notifyTelegram(message) {
@@ -38,112 +31,83 @@ async function notifyTelegram(message) {
   }
 }
 
-async function checkIfShouldRequest() {
-  if (isProcessing) return false;
+async function checkConditionsAndExecute() {
+  try {
+    const wallet = await getPiWalletAddressFromSeed(mnemonic);
+    const senderKeypair = StellarSdk.Keypair.fromSecret(wallet.secretKey);
+    const senderPublic = wallet.publicKey;
 
-  const nativeBalance = lastAccountData?.balances?.find(b => b.asset_type === 'native');
-  const balance = nativeBalance ? parseFloat(nativeBalance.balance) : 0;
-  if (balance > MIN_SEND_BALANCE) return true;
+    const resAccount = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
+    const nativeBalanceObj = resAccount.data.balances.find(b => b.asset_type === 'native');
+    const balance = nativeBalanceObj ? parseFloat(nativeBalanceObj.balance) : 0;
 
-  if (lastClaimables && lastClaimables.length > 0) return true;
+    const resClaim = await axios.get(`https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=100`);
+    const claimables = resClaim.data._embedded?.records || [];
 
-  return false;
-}
+    const canWithdraw = balance > 2;
+    const canClaim = claimables.length > 0;
 
-async function processClaimAndSend() {
-  const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
-  const mnemonic = process.env.MNEMONIC;
-  const recipient = process.env.RECEIVER_ADDRESS;
+    if (!canWithdraw && !canClaim) {
+      console.log("⏳ Menunggu saldo bisa di-claim atau dikirim...");
+      return;
+    }
 
-  const wallet = await getPiWalletAddressFromSeed(mnemonic);
-  const senderKeypair = StellarSdk.Keypair.fromSecret(wallet.secretKey);
-  const senderPublic = wallet.publicKey;
+    if (canClaim) {
+      console.log(`📥 Ada ${claimables.length} claimable balances. Klaim...`);
+      for (const claim of claimables) {
+        try {
+          const account = await server.loadAccount(senderPublic);
+          const baseFee = await server.fetchBaseFee();
 
-  const accountRes = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
-  lastAccountData = accountRes.data;
+          const tx = new StellarSdk.TransactionBuilder(account, {
+            fee: baseFee.toString(),
+            networkPassphrase: 'Pi Network',
+          })
+            .addOperation(StellarSdk.Operation.claimClaimableBalance({ balanceId: claim.id }))
+            .setTimeout(30)
+            .build();
 
-  const nativeBalanceObj = lastAccountData.balances.find(b => b.asset_type === 'native');
-  const balance = nativeBalanceObj ? parseFloat(nativeBalanceObj.balance) : 0;
-
-  const claimUrl = `https://api.mainnet.minepi.com/claimable_balances?claimant=${senderPublic}&limit=100`;
-  const claimRes = await axios.get(claimUrl);
-  lastClaimables = claimRes.data._embedded?.records || [];
-
-  if (lastClaimables.length > 0) {
-    console.log(`📥 Klaim ${lastClaimables.length} saldo...`);
-    for (const claim of lastClaimables) {
-      try {
-        const account = await server.loadAccount(senderPublic);
-        const baseFee = await server.fetchBaseFee();
-
-        const tx = new StellarSdk.TransactionBuilder(account, {
-          fee: baseFee.toString(),
-          networkPassphrase: 'Pi Network',
-        })
-          .addOperation(StellarSdk.Operation.claimClaimableBalance({
-            balanceId: claim.id
-          }))
-          .setTimeout(30)
-          .build();
-
-        tx.sign(senderKeypair);
-        await server.submitTransaction(tx);
-        console.log(`✅ Klaim berhasil: ${claim.id}`);
-      } catch (err) {
-        console.error(`⚠️ Klaim gagal (${claim.id}):`, err.message);
+          tx.sign(senderKeypair);
+          const result = await server.submitTransaction(tx);
+          console.log(`✅ Klaim berhasil ID ${claim.id}`);
+        } catch (err) {
+          console.error(`❌ Gagal klaim ${claim.id}:`, err.response?.data || err.message || err);
+        }
       }
     }
+
+    if (canWithdraw) {
+      const withdrawAmount = balance - 2;
+      const amountStr = withdrawAmount.toFixed(7);
+      const baseFee = await server.fetchBaseFee();
+      const account = await server.loadAccount(senderPublic);
+
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: baseFee.toString(),
+        networkPassphrase: 'Pi Network',
+      })
+        .addOperation(StellarSdk.Operation.payment({
+          destination: recipient,
+          asset: StellarSdk.Asset.native(),
+          amount: amountStr,
+        }))
+        .setTimeout(30)
+        .build();
+
+      tx.sign(senderKeypair);
+      const result = await server.submitTransaction(tx);
+      const txHash = result.hash;
+      const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
+      console.log(`✅ Kirim ${amountStr} Pi berhasil!`);
+      console.log(`🔗 ${explorerLink}`);
+
+      await notifyTelegram(`✅ Berhasil kirim ${amountStr} Pi ke ${recipient}\n🔗 ${explorerLink}`);
+    }
+
+  } catch (e) {
+    console.error("❌ Error saat proses:", e.response?.data || e.message || e);
   }
-
-  const updatedRes = await axios.get(`https://api.mainnet.minepi.com/accounts/${senderPublic}`);
-  lastAccountData = updatedRes.data;
-
-  const newBalanceObj = lastAccountData.balances.find(b => b.asset_type === 'native');
-  const newBalance = newBalanceObj ? parseFloat(newBalanceObj.balance) : 0;
-
-  const withdrawAmount = newBalance - 2;
-  if (withdrawAmount <= 0) {
-    console.log("⚠️ Saldo belum cukup untuk kirim.");
-    return;
-  }
-
-  const amountStr = withdrawAmount.toFixed(7);
-  console.log(`➡️ Mengirim ${amountStr} Pi ke ${recipient}`);
-
-  const account = await server.loadAccount(senderPublic);
-  const baseFee = await server.fetchBaseFee();
-
-  const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: baseFee.toString(),
-    networkPassphrase: 'Pi Network',
-  })
-    .addOperation(StellarSdk.Operation.payment({
-      destination: recipient,
-      asset: StellarSdk.Asset.native(),
-      amount: amountStr,
-    }))
-    .setTimeout(30)
-    .build();
-
-  tx.sign(senderKeypair);
-  const result = await server.submitTransaction(tx);
-  const txHash = result.hash;
-  const explorerLink = `https://api.mainnet.minepi.com/transactions/${txHash}`;
-
-  console.log(`✅ Kirim sukses! 🔗 ${explorerLink}`);
-  await notifyTelegram(`✅ Kirim ${amountStr} Pi sukses!\n🔗 ${explorerLink}`);
 }
 
-setInterval(async () => {
-  const shouldProcess = await checkIfShouldRequest();
-  if (!shouldProcess) return;
-
-  isProcessing = true;
-  try {
-    await processClaimAndSend();
-  } catch (e) {
-    console.error("❌ Error saat proses:", e.message);
-  } finally {
-    isProcessing = false;
-  }
-}, 100);
+// Loop tiap 100ms, tapi hanya proses saat perlu
+setInterval(checkConditionsAndExecute, 100);
