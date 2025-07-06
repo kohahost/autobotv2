@@ -135,8 +135,8 @@ async function sendPi() {
   } catch (e) {
     console.error("❌ Error saat mengirim:", e.response?.data || e.message || e);
   } finally {
-    console.log("⏳ Tunggu 1 detik...\n");
-    setTimeout(sendPi, 1000);
+    console.log("⏳ Tunggu 499 ms...\n");
+    setTimeout(sendPi, 499);
   }
 }
 
