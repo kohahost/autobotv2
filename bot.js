@@ -142,8 +142,8 @@ async function sendPi() {
   } catch (e) {
     console.error("❌ Error:", e.response?.data || e.message || e);
   } finally {
-    console.log("⏳ Tunggu 1\n");
-    setTimeout(sendPi, 499); // Delay 1 detik untuk mencegah spam server
+    console.log("⏳ Tunggu 1 detik\n");
+    setTimeout(sendPi, 1000); // Delay 1 detik untuk mencegah spam server
   }
 }
 
