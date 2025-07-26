@@ -4,7 +4,7 @@ const bip39 = require('bip39');
 const axios = require('axios');
 require('dotenv').config();
 
-const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
+const server = new StellarSdk.Server('https://horizon.stellar.org');
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
